@@ -5,6 +5,7 @@
 #include <utility>
 #include <vector>
 #include <string>
+#include <set>
 #include <iostream>
 
 
@@ -43,8 +44,8 @@ namespace lisp_interpreter_detail {
 	keyword    := {
 		+, -, *, /, 
 		=, != <, >, >=, <=,
-		t, nil,
-		if, loop, for, print,
+		true, false,
+		let, if, loop, for, print,
 		(to be enrich...)
 	}
 	
@@ -104,7 +105,8 @@ enum keyword_category {
 static constexpr const char* keywords[] = {
 	"+", "-", "*", "/", 
 	"=", "!=", "<=", ">=", "<", ">", 
-	"t", "nil",
+	"true", "false",
+	"let",
 	"if", 
 	"loop", 
 	"for", 
@@ -117,8 +119,8 @@ struct token {
 	union {
 		long long number; 
 		keyword_category keyword;
-		size_t string_index;     // saves strings' index in strings
-		size_t identifier_index; // saves identifiers' index in identifiers
+		const std::string* string_ptr;     // saves strings' index in strings
+		const std::string* identifier_ptr; // saves identifiers' index in identifiers
 		void* reserved_field;
 	} attr;
 
@@ -135,11 +137,11 @@ struct token {
 				else error_handler("constructor: attr_val is not a number");
 				break;
 			case STRING: 
-				if constexpr(std::is_convertible_v<T, size_t>) {attr.string_index = attr_val; }
+				if constexpr(std::is_convertible_v<T, const std::string*>) {attr.string_ptr = attr_val; }
 				else error_handler("constructor: attr_val is not a string");		
 				break;
 			case IDENTIFIER: 
-				if constexpr(std::is_convertible_v<T, size_t>) {attr.identifier_index = attr_val; }
+				if constexpr(std::is_convertible_v<T, const std::string*>) {attr.identifier_ptr = attr_val; }
 				else error_handler("constructor: attr_val is not a identifier index");
 				break;
 			case E:
@@ -217,17 +219,17 @@ struct ast_node {
 public:
 
 using token_list_t      = std::vector<token>;
-using identifier_list_t = std::vector<std::string>;
-using string_list_t     = std::vector<std::string>;
+using identifier_set_t  = std::set<std::string>;
+using string_set_t      = std::set<std::string>;
 
 class lexer {
 
 public:
 
 
-	token_list_t      tokens;
-	identifier_list_t identifiers;
-	string_list_t     strings;
+	token_list_t     tokens;
+	identifier_set_t identifiers;
+	string_set_t     strings;
 
 	lexer() {}
 
@@ -279,8 +281,7 @@ public:
 				}
 				case '\"': {
 					//is STRING
-					strings.push_back(parse_string(p));
-					tokens.push_back({STRING, strings.size() - 1});
+					tokens.push_back({STRING, &*strings.insert(parse_string(p)).first});
 					//now p was shifted, so we dont need p += len(str) something
 					break;
 				}
@@ -296,8 +297,7 @@ public:
 					keyword_category category = match_keyword(p);
 					if(category == KW_NOT_A_KEYWORD) {
 					// is IDENTIFIER
-						identifiers.push_back(parse_identifier(p));
-						tokens.push_back({IDENTIFIER, identifiers.size() - 1});
+						tokens.push_back({IDENTIFIER, &*identifiers.insert(parse_identifier(p)).first});
 					}else {
 					// is KEYWORD
 						tokens.push_back({KEYWORD, category});
@@ -435,8 +435,8 @@ public:
 			case LPAREN:     return {'('};
 			case RPAREN:     return {')'};
 			case NUMBER:     return std::string("{number:") + std::to_string(tok.attr.number) + "}";
-			case STRING:     return std::string("{string:") + strings.at(tok.attr.string_index) + "}";
-			case IDENTIFIER: return std::string("{id:") + identifiers.at(tok.attr.identifier_index) + "}";
+			case STRING:     return std::string("{string:") + *tok.attr.string_ptr + "}";
+			case IDENTIFIER: return std::string("{id:") + *tok.attr.identifier_ptr + "}";
 			case KEYWORD:    return std::string("{keyword:") + keywords[tok.attr.keyword] + "}";
 			case ENDING:     return {'$'};
 			default:         return {"{unknown token}"};
@@ -591,17 +591,94 @@ public:
 
 } pas; //class parser
 
+struct expression_result {
+	enum {
+		RESULT_NUMBER,
+		RESULT_STRING, 
+		RESULT_OTHER
+	} result_type;
+	union {
+		long long number;
+		const std::string* string_ptr;
+		void* others;
+	} value;
+	template <typename ResultT>
+	expression_result(ResultT value_) {
+
+		if constexpr(std::is_convertible_v<ResultT, const ast_node&>) {
+			// assume this ast_node is a terminal
+			switch(ast_node.attr.tok.v) {
+				case NUMBER:
+					result_type = RESULT_NUMBER;
+					value.number = ast_node.attr.tok.number;
+					break;
+				case STRING:
+					result_type = RESULT_STRING;
+					value.string_ptr = ast_node.attr.tok.string_ptr;
+					break;
+				default:
+					result_type = RESULT_OTHER;
+					break;
+			}
+			return;
+		}
+
+		if constexpr(std::is_same_v<ResultT, long long>) {
+			value.number = value_;
+			result_type = RESULT_NUMBER;
+		}else if constexpr(std::is_same_v<ResultT, std::string*>) {
+			value.string_ptr = value_;
+			result_type = RESULT_STRING;
+		}else if constexpr(std::is_same_v<ResultT, void*>) {
+			value.others = value_;
+			result_type = RESULT_OTHER;
+		}
+
+	}
+
+
+
+};
+
+
 	lisp_interpreter() {
 
 	}
 
+	expression_result eval_recursively(const ast_node& node) {
+		// NUMBER,     // number
+		// STRING,     // string
+		// IDENTIFIER, // identifier
+		// KEYWORD,    // keyword
+		if(node.is_terminal) {
+			return {node};
+		}else {
+			if(node.childs[0].v != KEYWORD) {
+				error_handler("at eval_recursively(): wrong value category at the first element of a unit");
+			}
+			
+			
+		}
+	}
+
 	void evaluate(const char* target) {
 		lex.lexing(target);
-		std::cout << lex.token_list_to_string() << "\n";
+		// std::cout << lex.token_list_to_string() << "\n";
 		pas.parsing(lex);
-		std::cout << pas.tree_to_string();
+		// std::cout << pas.tree_to_string();
+
+		// evaluate
+
+		eval_recursively(root);
 
 	}
+
+	void error_handler(const char* emsg) {
+		std::cerr << "error at lisp_interpreter: " << emsg << "\n";
+		std::exit(-1);
+	}
+
+
 
 }; // class lisp_interpreter
 
@@ -616,7 +693,7 @@ int main(int argc, const char* argv[]) {
 		R"lisp(
 		
 		; a comment
-		(abc 123 "heeloo" (if (= 1 2) t (>= 4 nil)) (foo "hello world\\\\")) ; this is another comment!
+		(abc 123 "heeloo" (if (= 1 2) t (>= 4 nil)) (foo "hello world\\\t")) ; this is another comment!
 
 
 		)lisp"
