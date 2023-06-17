@@ -19,6 +19,19 @@ import regex as re
 import queue as que
 from enum import Enum, auto
 
+class end_token:
+	def __eq__(self, other):
+		return True
+	def __ne__(self, other):
+		return False
+	def __str__(self):
+		return '$'
+	def __repr__(self):
+		return '%end%'
+	def __hash__(self):
+		return hash(repr(self))
+
+
 class production: # grammer production type(BNF)
 	head = str()
 	body = list[str]()
@@ -43,7 +56,7 @@ def print_dictset(dictset: dict[str, set[str]]):
 
 def print_productions(P: list[production]):
 	# print('Start = <{}>'.format(P[0].head))
-	for i, p in enumerate(P, 1): print('{: <4} {}'.format(str(i) + '.', str(p)))
+	for i, p in enumerate(P): print('{: <4} {}'.format(str(i) + '.', str(p)))
 
 def print_all(gen):
 	print('--------grammer--------')
@@ -385,7 +398,7 @@ class generator:
 
 	def update_sets(self):
 		self.generate_first(self.g.P)
-		self.generate_follow(self.g.P, self.g.S)
+		self.generate_follow(self.g.P, self.g.P[0].head)
 		self.generate_select(self.g.P)
 
 
@@ -477,61 +490,62 @@ class item_lr0:
 
 		return item_lr0(self.prod, (self.ppos + 1 if self.ppos <= len(self.prod.body) else len(self.prod.body)), is_kernel = True)
 
+		# is a reduction item OR an acctption item
 	def is_reduction_item(self):
 		return self.ppos >= len(self.prod.body)
 
 class action_category(Enum):
-	SHIFTIN = 's'
+	SHIFT = 's'
 	REDUCE  = 'r'
 	ACCEPT  = 'acc'
 	ERROR   = 'x' 
+	GOTO    = 'g'
 
 	NONE    = 'N' # a placeholder
 
-class end_token:
-	def __eq__(self, other):
-		return True
-	def __ne__(self, other):
-		return False
-	def __str__(self):
-		return '%END%'
 
-# a SLR PushDown Automaton
+
+# a SLR(1) PushDown Automaton
 class slr_pda:
 
-	# goto: list[dict[str, int]]
-	g: grammer # used to reduction
-	action = None # : list[dict[str | {end_token}, tuple[action_category, int]]]
-	stack: list[str] # as a stack of grammer token
+	# G := (V, T, P, S)
+	# SLR(1) PDA M := ( Q = {q}, 
+	#                   Σ = T, 
+	#                   Γ = items_collection, 
+	#                   δ = action,
+	#                   q0 = q,
+	#                   z0 = $,
+	#                   F = Φ ) 
 
-	def generate_action(self, follow, items, goto_table: list[dict[str, int]]):
+	g: grammer # used to reduction 
+	action = None # : list[dict[str | {end_token}, tuple[action_category, int]]]
+
+	def generate_action(self, follow, items_collection, goto_table: list[dict[str, int]]):
 		# follow = self.g.follow
 		# V = self.g.V
 		T = self.g.T
 		self.action = [] # : list[dict[str | {end_token}, tuple[action_category, int]]]
-		for index, item in enumerate(items):
-			
-		# for i, d in enumerate(goto_table):
-			# self.action.append(dict())
-			# for x, j in d.items():
-			# 	set_flag = False
-			# 	for item in items[i]:
-			# 		if item.ppos >= len(item.prod.body):
-			# 			if item.prod == self.g.P[0]:
-			# 				# an accept item set
-			# 				self.action[i][end_token()] = (action_category.ACCEPT, None)
-			# 				set_flag = True
-			# 				break
-			# 			elif x in follow[item.prod.head]:
-			# 				index_of_production = self.g.P.index(item.prod)
-			# 				self.action[i][x] = (action_category.REDUCE, index_of_production)
-			# 				# a reduce item set
-			# 				set_flag = True
-			# 				break
-
-			# 	if (not set_flag) and x in T:
-			# 		# a shift-in item set
-			# 		self.action[i][x] = (action_category.SHIFTIN, j)
+		for index, items in enumerate(items_collection):
+			# index: index of this item set
+			# items: a set of productions with points
+			self.action.append(dict())
+			# self.action[index]...
+			for item in items:
+				if item.is_reduction_item():
+					if item.prod.head == self.g.S:
+						# item is an acception item set
+						self.action[index][end_token()] = (action_category.ACCEPT, None)
+					else:
+						for x in follow[item.prod.head]:
+							# item is a reduction item set
+							index_of_production = self.g.P.index(item.prod)
+							self.action[index][x if x != '$' else end_token()] = (action_category.REDUCE, index_of_production)
+				else: # this item isn't a reduction item
+					for x, target_index in goto_table[index].items():
+						if x in T:
+							self.action[index][x] = (action_category.SHIFT, target_index)
+						else: # x in V
+							self.action[index][x] = (action_category.GOTO, target_index)
 
 	 # action : list[dict[str | {end_token}, tuple[action_category, int]]]
 	def print_action(self):
@@ -542,11 +556,59 @@ class slr_pda:
 				# print('  Φ')
 				continue
 			for k, v in d.items():
-
-				print('  {}: {}{}  '.format(str(k), v[0].value, v[1]), end = '')
+				if v[0] == action_category.ACCEPT:
+					print('  {}: {}  '.format(str(k), v[0].value), end = '')
+				elif v[0] == action_category.GOTO:
+					print('  {}: goto {}  '.format(str(k), v[1]), end = '')		
+				else:
+					print('  {}: {}{}  '.format(str(k), v[0].value, v[1]), end = '')
 			print()
 
 
+	# test a tok sequence toks whether to be accepted by this SLR PDA
+	def test(self, toks):
+		toks.append(end_token())
+		stack = [0] # saves the index of item set
+		# alias
+		push = lambda x: stack.append(x)
+		pop  = lambda  : stack.pop()
+		top  = lambda  : stack[-1]
+		P    = self.g.P
+		action = self.action # action[state_index][x] -> (action_category, shift_state_index or reduce_production_index or None)
+
+		# for i, tok in enumerate(toks):
+		tok_index = 0
+		print(toks)
+		while True:
+			tok = toks[tok_index]
+			print(stack)
+			# print(tok)
+			# print(action[top()])
+			if tok in action[top()]:
+				category, arg = action[top()][tok]
+				if category == action_category.SHIFT:
+					push(arg)
+					tok_index += 1
+				elif category == action_category.REDUCE:
+					# quary the reduct production
+					p = P[arg]
+					for i in range(len(p.body)): pop()
+					push(action[top()][p.head][1]) # actually is push(goto[top()][p.head])
+				elif category == action_category.ACCEPT:
+					return(True, tok_index - 1)
+				else:
+					# bad action table
+					return (False, 'bad teble at index ' + str(tok_index))
+			else:
+				# error
+				return (False, tok_index)
+
+		return (False, len(toks) - 1)
+
+		# end of tokens
+		# while True:
+
+		# return (end_token() in action[top()] and action[top()][end_token()][0] == action_category.ACCEPT, len(toks))
 
 	def __init__(self, lrgen):
 		self.g = lrgen.g
@@ -564,8 +626,8 @@ class lr_generator:
 	items_collection = list[set]() # [I0, I1, I2, ...]
 	goto = list[dict[str, int]]() # goto(i, X) -> i  (i is index of I, X ∈ V | T)
 
-	def to_string(self, items):
-		return '{{{}}}'.format()
+	# def to_string(self, items):
+	# 	return '{{{}}}'.format()
 
 	def print_items(self):
 		for index, items in enumerate(self.items_collection):
@@ -642,23 +704,40 @@ class lr_generator:
 		self.gen = gen
 		self.g = gen.g
 		# widen grammer
-		gen.g.P.insert(0, production(gen.g.S + '\'', [gen.g.S]))
-		gen.update_sets()
+		self.gen.g.P.insert(0, production(gen.g.S + '\'', [gen.g.S]))
+		self.gen.update_sets()
 		self.items()
 
 
 
-# test
+# # test
+# P = lex(r'''
+# 		S' -> S
+# 		S -> E
+# 		E -> T | E
+# 		T -> F T
+# 		F -> char
+# 		  -> (E)
+# 		  -> F*
+# 		  -> F+
+#  	''')
+
 P = lex(r'''
-		S' -> S
-		S -> E
-		E -> T | E
-		T -> F T
-		F -> char
-		  -> (E)
-		  -> F*
-		  -> F+
- 	''')
+	E -> E + T
+	  -> T
+	T -> T * F
+	  -> F
+	F -> (E)
+	  -> id
+ ''')
+
+# P = lex(r'''
+# 	S -> L = R 
+# 	  -> R
+# 	L -> * R 
+# 	  -> id
+# 	R -> L
+# ''')
 
 # P = lex(r'''
 # 	S -> E
@@ -696,27 +775,27 @@ P = lex(r'''
 # 	''')
 
 gen = generator(P)
-print_all(gen)
+# print_all(gen)
 
-print('-------remove-empty-production--------')
-gen.remove_empty_productions()
-print_productions(gen.g.P)
-print('-------remove-single-production-------')
-gen.remove_single_productions()
-print_productions(gen.g.P)
-print('--------remove-left-recursion---------')
-gen.remove_left_recursion(by_order = True, allow_empty_production = True)
+# print('-------remove-empty-production--------')
+# gen.remove_empty_productions()
+# print_productions(gen.g.P)
+# print('-------remove-single-production-------')
+# gen.remove_single_productions()
+# print_productions(gen.g.P)
+# print('--------remove-left-recursion---------')
+# gen.remove_left_recursion(by_order = True, allow_empty_production = True)
 # print_productions(
 # gen.remove_direct_left_recursion('S', gen.g.P)
 # )
-print_productions(gen.g.P)
-print('--------remove-verbose-productions---------')
-gen.remove_verbose_producions_and_sort()
 # print_productions(gen.g.P)
-print_all(gen)
+# print('--------remove-verbose-productions---------')
+# gen.remove_verbose_producions_and_sort()
+# print_productions(gen.g.P)
+# print_all(gen)
 print('----------------LR-Generator---------------')
 lr_gen = lr_generator(gen)
-print_all(gen)
+print_all(lr_gen.gen)
 print('-------------------items-------------------')
 lr_gen.print_items()
 print('--------------------goto-------------------')
@@ -724,3 +803,7 @@ lr_gen.print_goto()
 print('-----------------SLR-PDA-------------------')
 slr = slr_pda(lr_gen)
 slr.print_action()
+print('-----------------test-PDA------------------')
+seq = ['id', '*', 'id']
+print(' '.join(seq))
+print(slr.test(seq))
