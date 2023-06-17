@@ -15,17 +15,20 @@ grammer-preprocess.py
 
 '''
 
+# TODO: deep copy of objects
+
 import regex as re
 import queue as que
+from copy import deepcopy
 from enum import Enum, auto
 
 class end_token:
 	def __eq__(self, other):
-		return True
+		return isinstance(other, end_token) 
 	def __ne__(self, other):
-		return False
+		return not isinstance(other, end_token)
 	def __str__(self):
-		return '$'
+		return '%end%'
 	def __repr__(self):
 		return '%end%'
 	def __hash__(self):
@@ -102,10 +105,10 @@ class generator:
 	follow   = dict[str, set[str]]()
 	select   = list[set[str]]()
 
-
 	def generate_first(self, P: set[production]):
 		V = {v.head for v in P} # variable set
 		T = {x for p in P for x in p.body if x not in V and x != 'ε'} # terminal set
+		T.add('$')
 
 		# for p in P: 
 		# 	for x in p.body: 
@@ -481,7 +484,6 @@ class item_lr0:
 		return s + '· '
 		# return "{: <3} -> {}".format(self.prod.head, ' '.join(self.prod.body))
 
-
 	def current_tok(self):
 		return self.prod.body[self.ppos] if self.ppos < len(self.prod.body) else 'ε'
 	def next(self):
@@ -494,12 +496,13 @@ class item_lr0:
 	def is_reduction_item(self):
 		return self.ppos >= len(self.prod.body)
 
+
 class action_category(Enum):
 	SHIFT = 's'
 	REDUCE  = 'r'
 	ACCEPT  = 'acc'
 	ERROR   = 'x' 
-	GOTO    = 'g'
+	GOTO    = 'goto '
 
 	NONE    = 'N' # a placeholder
 
@@ -558,8 +561,8 @@ class slr_pda:
 			for k, v in d.items():
 				if v[0] == action_category.ACCEPT:
 					print('  {}: {}  '.format(str(k), v[0].value), end = '')
-				elif v[0] == action_category.GOTO:
-					print('  {}: goto {}  '.format(str(k), v[1]), end = '')		
+				# elif v[0] == action_category.GOTO:
+				# 	print('  {}: goto {}  '.format(str(k), v[1]), end = '')		
 				else:
 					print('  {}: {}{}  '.format(str(k), v[0].value, v[1]), end = '')
 			print()
@@ -615,19 +618,17 @@ class slr_pda:
 		self.generate_action(lrgen.gen.follow, lrgen.items_collection, lrgen.goto)
 
 
-class lr_generator:
+# SLR generator
+class slr_generator:
 	gen = None
 	g = None
 
 	exists_conflict = False
 
-
-	# LR(0) automaton:
+	# LR(0) / SLR(1) automaton:
 	items_collection = list[set]() # [I0, I1, I2, ...]
 	goto = list[dict[str, int]]() # goto(i, X) -> i  (i is index of I, X ∈ V | T)
 
-	# def to_string(self, items):
-	# 	return '{{{}}}'.format()
 
 	def print_items(self):
 		for index, items in enumerate(self.items_collection):
@@ -669,12 +670,13 @@ class lr_generator:
 				J.add(i.next())
 		return self.closure(J) if len(J) != 0 else J
 
-	# LR(0) generate item_lr0 set collection 
+	# LR(0), generate item_lr0 set collection 
 	# items function generates items_collection and goto table
 	def items(self):
 		# C should be a list because GOTO function need to target the items set by index
-		C = [ self.closure( { item_lr0(gen.g.P[0], is_kernel = True) } ) ] # gen.g.P[0] == [CLOSURE(S' -> ·S)]
-		self.goto.append(dict())
+		C = [ self.closure( { item_lr0(self.g.P[0], is_kernel = True) } ) ] # gen.g.P[0] == [CLOSURE(S' -> ·S)]
+		
+		goto = [dict()]
 		X = self.g.V | self.g.T
 		while True:
 			changed = False
@@ -683,33 +685,171 @@ class lr_generator:
 					if len(J := self.try_goto(I, x)) != 0:
 						if J not in C:
 							C.append(J)
-							self.goto.append(dict())
+							goto.append(dict())
 							# goto: I * X -> I list[dict[str, int]]
-							if x not in self.goto[index]:
-								# a conflict
-								self.goto[index][x] = len(C) - 1
+							if x not in goto[index]:
+								goto[index][x] = len(C) - 1
 							else:
-								self.goto[index][x] = -1
+								# a conflict
+								goto[index][x] = -1
 								exists_conflict = True
 							changed = True
 						else: # J in C
-							self.goto[index][x] = C.index(J)
+							goto[index][x] = C.index(J)
 
 			if not changed: break
 
 		self.items_collection = C
+		self.goto = goto
 
 
 	def __init__(self, gen):
-		self.gen = gen
-		self.g = gen.g
+		self.gen = deepcopy(gen)
+		self.g = self.gen.g
 		# widen grammer
-		self.gen.g.P.insert(0, production(gen.g.S + '\'', [gen.g.S]))
+		self.g.P.insert(0, production(gen.g.S + '\'', [gen.g.S]))
 		self.gen.update_sets()
 		self.items()
 
 
+# LR(1) item
+class item_lr1(item_lr0):
+	lookahead: str #look ahead token of an item
 
+	def __init__(self, prod, lookahead, ppos = 0, is_kernel = False):
+		super().__init__(prod, ppos, is_kernel)
+		self.lookahead = lookahead
+
+	def __eq__(self, other):
+		return self.ppos == other.ppos and self.prod == other.prod and self.lookahead == other.lookahead;
+	def __ne__(self, other):
+		return not self == other
+	def __hash__(self):
+		return hash((self.prod, self.ppos, self.lookahead))
+
+	def __str__(self):
+		# print(self.lookahead != end_token(), self.lookahead)
+		# return '[' + super().__str__() + ', ' + (self.lookahead if self.lookahead != end_token() else '$') + ']'
+		return '{: <20} {: >5}'.format(super().__str__(), '(' + (self.lookahead if self.lookahead != end_token() else '$') + ')')
+
+	def next(self):
+		if self.prod.body[0] == 'ε': 
+			return self.copy()
+
+		return item_lr1(self.prod, self.lookahead, (self.ppos + 1 if self.ppos <= len(self.prod.body) else len(self.prod.body)), is_kernel = True)
+
+	# # closure of this item
+	# def closure(self, G: grammer):
+	# 	J = {self}
+	# 	while True:
+	# 		changed = False
+	# 	if self.current_tok() in G.V:
+
+	def closure_lookaheads(self, gen):
+		# for an item [A -> αBβ, a]
+		# returns a set: first(βa)
+		return gen.first_of_seq(self.prod.body[self.ppos + 1:] + [self.lookahead if self.lookahead != end_token() else '$'])
+
+	def core(self):
+		return super()
+
+	def is_reduction_item(self, lookahead = None):
+		return self.ppos >= len(self.prod.body) and (lookahead is None or self.lookahead == lookahead)
+
+# Canonical LR(1) Generator 
+class lr1_generator:
+	gen = None
+	g = None # grammer
+
+	# Canonical LR(1) automaton:
+	items_collection = list[set]() # [I0, I1, I2, ...]
+	goto = list[dict[str, int]]() # goto(i, X) -> i  (i is index of I, X ∈ V | T)
+
+
+	exists_conflict = False
+
+	def __init__(self, gen):
+		self.gen = deepcopy(gen)
+		self.g = self.gen.g
+		# widen grammer
+		self.g.P.insert(0, production(gen.g.S + '\'', [gen.g.S]))
+		self.gen.update_sets()
+		self.items()
+
+	# LR(1) automaton:
+	items_collection = list[set[item_lr1]]() # [I0, I1, I2, ...]
+	goto = list[dict[str, int]]() # goto(i, X) -> i  (i is index of I, X ∈ V | T)
+
+	def print_items(self):
+		for index, items in enumerate(self.items_collection):
+			# print kernel items first
+			(list_of_tiems := list(items)).sort(key = lambda item: item.is_kernel, reverse = True)
+
+			print('{: <3} \n{}\n'.format(str(index) + '.', '\n'.join([str(item) for item in list_of_tiems])))
+
+	def print_goto(self):
+		print('valid grammer.' if not self.exists_conflict else 'invalid grammer, exists conflict')
+		for index, d in enumerate(self.goto):
+			print('{: <3}'.format(str(index) + '.'))
+			if not d: 
+				# print('  Φ')
+				continue
+			for k, v in d.items():
+				print('  {}: {}  '.format(k, v), end = '')
+			print()
+
+	# Canonical LR(1) construction
+
+	# closure of LR(1) item set
+	def closure(self, I: set[item_lr1]):
+		J = I.copy()
+		while True:
+			changed = False
+
+			for item in {j for j in J if j.current_tok() in self.gen.g.V}:
+				for p in {p for p in self.g.P if p.head == item.current_tok()}:
+					for b in item.closure_lookaheads(self.gen):
+						if (new_item := item_lr1(p, (b if b != '$' else end_token()), is_kernel = False)) not in J:
+							J.add(new_item)
+							changed = True
+			if not changed: break
+		return J
+
+	def try_goto(self, I, X):
+		J = set()
+		for item in I:
+			if item.current_tok() == X:
+				J.add(item.next())
+		return self.closure(J)
+
+	def items(self):
+		C = [ self.closure( { item_lr1(gen.g.P[0], lookahead = end_token(), is_kernel = True) } ) ] # gen.g.P[0] == [CLOSURE(S' -> ·S)]
+		goto = [dict()]
+		
+		X = self.g.V | self.g.T
+
+		while True:
+			changed = False
+			for index, items in enumerate(C):
+				for x in X:
+					if len(J := self.try_goto(items, x)) != 0:
+						if J not in C:
+							C.append(J)
+							goto.append(dict())
+							# goto: I * X -> I list[dict[str, int]]
+							if x not in goto[index]:
+								goto[index][x] = len(C) - 1
+							else:
+								# a conflict
+								goto[index][x] = -1
+								exists_conflict = True
+							changed = True
+						else: # J in C
+							goto[index][x] = C.index(J)
+			if not changed: break
+
+		self.items_collection = C
+		self.goto = goto
 # # test
 # P = lex(r'''
 # 		S' -> S
@@ -722,14 +862,20 @@ class lr_generator:
 # 		  -> F+
 #  	''')
 
-P = lex(r'''
-	E -> E + T
-	  -> T
-	T -> T * F
-	  -> F
-	F -> (E)
-	  -> id
- ''')
+# P = lex(r'''
+# 	E -> E + T
+# 	  -> T
+# 	T -> T * F
+# 	  -> F
+# 	F -> (E)
+# 	  -> id
+#  ''')
+
+P = lex('''
+	S -> C C
+	C -> c C
+	  -> d
+''')
 
 # P = lex(r'''
 # 	S -> L = R 
@@ -776,7 +922,6 @@ P = lex(r'''
 
 gen = generator(P)
 # print_all(gen)
-
 # print('-------remove-empty-production--------')
 # gen.remove_empty_productions()
 # print_productions(gen.g.P)
@@ -793,17 +938,24 @@ gen = generator(P)
 # gen.remove_verbose_producions_and_sort()
 # print_productions(gen.g.P)
 # print_all(gen)
-print('----------------LR-Generator---------------')
-lr_gen = lr_generator(gen)
-print_all(lr_gen.gen)
+print('---------------SLR-Generator---------------')
+slr_gen = slr_generator(gen)
+print_all(slr_gen.gen)
 print('-------------------items-------------------')
-lr_gen.print_items()
-print('--------------------goto-------------------')
-lr_gen.print_goto()
+slr_gen.print_items()
+print('-------------------goto--------------------')
+slr_gen.print_goto()
 print('-----------------SLR-PDA-------------------')
-slr = slr_pda(lr_gen)
+slr = slr_pda(slr_gen)
 slr.print_action()
-print('-----------------test-PDA------------------')
-seq = ['id', '*', 'id']
-print(' '.join(seq))
-print(slr.test(seq))
+# print('-----------------test-PDA------------------')
+# seq = ['id', '*', 'id']
+# print(' '.join(seq))
+# print(slr.test(seq))
+print('----------Canonical-LR-Generator-----------')
+lr1_gen = lr1_generator(gen)
+print_all(lr1_gen.gen)
+print('-------------------items-------------------')
+lr1_gen.print_items()
+print('-------------------goto--------------------')
+lr1_gen.print_goto()
