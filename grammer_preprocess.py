@@ -6,11 +6,18 @@ grammer-preprocess.py
 	first-set
 	follow-set
 	nullable-set
+
+	SLR(1) generator
+	Canonical LR / LR(1) generator
+	LALR(1) generator
+	
+	SLR(1) PDA
+	LR(1)  PDA
 	...
 	
 	
 
-	CFG-BNF grammer:
+	BNF(CFG) grammer:
 	G := (V, T, P, S), where S ∈ V
 
 '''
@@ -108,6 +115,8 @@ def lex(s: str) -> list[production]:
 	last_v = str()
 	for p in s.strip(' \n\t\v\f\r').split('\n'):
 		# print(p)
+		if (p := p.strip(' \n\t\v\f\r')) == '': continue # skip empty line
+
 		v = re.search(r"(?=\s*)\w+\'*(?=\s*\-\>.*)", p)
 		body = re.findall(r"\w+\'*|[^\s\w]", p[v.span()[1]:] if v != None else p)[2:]
 		result.append(production(v.group() if v != None else last_v.group(), body if len(body) != 0 else ['ε']))
@@ -248,7 +257,7 @@ class generator:
 		while not q.empty():
 			this_body = q.get()
 			if len(this_body) == 1 and this_body[0] == v:
-				continue # S -> αAβ, αβ = ε
+				continue # V -> αAβ, αβ = ε
 
 			for i, tok in enumerate(this_body):
 				if tok == v:
@@ -276,7 +285,9 @@ class generator:
 				self.g.P.pop(i)
 			
 			for p in self.g.P:
-				if not self.nullable[p.head] or p.body.count(v) == 0: continue
+				# why?
+				# if not self.nullable[p.head] or 
+				if p.body.count(v) == 0: continue
 				self.add_non_empty_expression(v, p)
 
 		self.update_sets()
@@ -606,7 +617,6 @@ class slr_pda:
 		P    = self.g.P
 		action = self.action # action[state_index][x] -> (action_category, shift_state_index or reduce_production_index or None)
 
-		# for i, tok in enumerate(toks):
 		tok_index = 0
 		print(toks)
 		while True:
@@ -1009,6 +1019,7 @@ class lalr_generator(slr_generator):
 		lr1gen = lr1_generator(self.gen, False)
 		lookahead_list, propagate_list = self.generate_lookahead_propagate_list(lr1gen) # new_item_collection is a LALR(1) item set collection
 		self.propagate(lookahead_list, propagate_list)
+		# print_itemset(self.items_collection)
 		
 
 # # test
@@ -1038,12 +1049,44 @@ class lalr_generator(slr_generator):
 # 	  -> d
 # ''')
 
+# P = lex(r'''
+# 	S -> L = R 
+# 	  -> R
+# 	L -> * R 
+# 	  -> id
+# 	R -> L
+# ''')
+
 P = lex(r'''
-	S -> L = R 
-	  -> R
-	L -> * R 
-	  -> id
-	R -> L
+
+	S -> DeclList Expr 
+
+	DeclList	-> id = literal DeclList'
+				-> :
+	DeclList'	-> , id = literal DeclList'
+				-> :
+
+	Expr	-> Expr binop Expr
+			-> preop Expr
+			-> ( Expr )
+			-> id ( Expr )
+			-> [ ExprList ]
+			-> IfExpr
+			-> WhileExpr
+			-> id
+			-> literal
+
+	IfExpr		-> if(Expr): Expr ElseExpr
+	ElseExpr	-> elif(Expr): Expr ElseExpr
+				-> else: Expr
+	WhileExpr	-> while(Expr): Expr
+
+	ExprList	-> Expr ExprList'
+				->
+	ExprList'	-> , Expr ExprList'
+				->
+
+
 ''')
 
 # P = lex(r'''
@@ -1091,10 +1134,10 @@ P = lex(r'''
 # 	''')
 
 gen = generator(P)
-# print_all(gen)
-# print('-------remove-empty-production--------')
-# gen.remove_empty_productions()
-# print_productions(gen.g.P)
+print_productions(gen.g.P)
+print('-------remove-empty-production--------')
+gen.remove_empty_productions()
+print_all(gen)
 # print('-------remove-single-production-------')
 # gen.remove_single_productions()
 # print_productions(gen.g.P)
@@ -1122,23 +1165,23 @@ gen = generator(P)
 # seq = ['id', '*', 'id']
 # print(' '.join(seq))
 # print(slr.test(seq))
-print('----------Canonical-LR-Generator-----------')
-lr1_gen = lr1_generator(generator(copy(P)))
-print_all(lr1_gen.gen)
-print('-------------------items-------------------')
-lr1_gen.print_items()
-print('-------------------goto--------------------')
-lr1_gen.print_goto()
-print('-----------------LR(1)-PDA-----------------')
-lr1 = lr1_pda(lr1_gen)
-lr1.print_action()
-print('-----------------test-PDA------------------')
-seq = ['*', 'id', '=', 'id']
-print(' '.join(seq))
-print(lr1.test(seq))
+# print('----------Canonical-LR-Generator-----------')
+# lr1_gen = lr1_generator(generator(copy(P)))
+# print_all(lr1_gen.gen)
+# print('-------------------items-------------------')
+# lr1_gen.print_items()
+# print('-------------------goto--------------------')
+# lr1_gen.print_goto()
+# print('-----------------LR(1)-PDA-----------------')
+# lr1 = lr1_pda(lr1_gen)
+# lr1.print_action()
+# print('-----------------test-PDA------------------')
+# seq = ['*', 'id', '=', 'id']
+# print(' '.join(seq))
+# print(lr1.test(seq))
 print('--------------LALR-Generator---------------')
-lalr_gen = lalr_generator(generator(copy(P)))
-print_all(lalr_gen.gen)
+lalr_gen = lalr_generator(gen)
+# print_all(lalr_gen.gen)
 print('-------------------items-------------------')
 lalr_gen.print_items()
 print('-------------------goto--------------------')
@@ -1147,6 +1190,6 @@ print('------------LALR/LR(1)-PDA-----------------')
 lalr = lr1_pda(lalr_gen)
 lalr.print_action()
 print('-----------------test-PDA------------------')
-# seq = ['id', '*', 'id']
+seq = ['id', '=', 'literal', ':', 'id']
 print(' '.join(seq))
 print(lalr.test(seq))
