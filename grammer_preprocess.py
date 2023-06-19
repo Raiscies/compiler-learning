@@ -15,11 +15,10 @@ grammer-preprocess.py
 
 '''
 
-# TODO: deep copy of objects
 
 import regex as re
 import queue as que
-from copy import deepcopy
+from copy import copy
 from enum import Enum, auto
 
 class end_token:
@@ -52,10 +51,18 @@ class production: # grammer production type(BNF)
 		return not self == other
 	def __hash__(self):
 		return hash([self.head].extend(self.body))
+
+	def __copy__(self):
+		return production(self.head, self.body.copy())
 		
 def print_dictset(dictset: dict[str, set[str]]):
 	for k, v in dictset.items():
 		print('{: <5} : {}'.format(k, ', '.join(v)))
+
+def print_itemset(items):
+	(list_of_tiems := list(items)).sort(key = lambda item: item.is_kernel, reverse = True)
+	print('{}\n'.format('\n'.join([str(item) for item in list_of_tiems])))
+
 
 def print_productions(P: list[production]):
 	# print('Start = <{}>'.format(P[0].head))
@@ -83,6 +90,15 @@ class grammer:
 	P = list[production]() # a grammer Principle set, contain objects of bnf
 	S = str()    # Start Variable of the grammer
 
+	def __init__(self, V = set(), T = set(), P = list(), S = str()):
+		self.V = V
+		self.T = T
+		self.P = P
+		self.S = S
+
+	def __copy__(self):
+		return grammer(self.V.copy(), self.T.copy(), self.P.copy(), self.S.copy())
+
 def lex(s: str) -> list[production]:
 	# bnf string ' A -> V1 op V2 num; '
 
@@ -93,7 +109,7 @@ def lex(s: str) -> list[production]:
 	for p in s.strip(' \n\t\v\f\r').split('\n'):
 		# print(p)
 		v = re.search(r"(?=\s*)\w+\'*(?=\s*\-\>.*)", p)
-		body = re.findall(r"\w+\'*|[^\s\w]", p[v.span()[1]:] if v != None else p)[2:33]
+		body = re.findall(r"\w+\'*|[^\s\w]", p[v.span()[1]:] if v != None else p)[2:]
 		result.append(production(v.group() if v != None else last_v.group(), body if len(body) != 0 else ['ε']))
 		if v != None: last_v = v 
 	return result
@@ -104,6 +120,9 @@ class generator:
 	first    = dict[str, set[str]]()
 	follow   = dict[str, set[str]]()
 	select   = list[set[str]]()
+
+	def __copy__(self):
+		return generator(self.g.P.copy(), self.g.S)
 
 	def generate_first(self, P: set[production]):
 		V = {v.head for v in P} # variable set
@@ -156,7 +175,7 @@ class generator:
 		self.nullable = nullable
 		self.first = first
 
-	def generate_follow(self, P: set[production], S: str):
+	def generate_follow(self, P: list[production], S: str):
 		follow = {v: set() for v in self.g.V}
 		follow[S].add('$')
 
@@ -187,13 +206,18 @@ class generator:
 
 	def first_of_seq(self, seq: list[str]) -> set[str]:
 		# generate the first set of a sequence seq
-		if not seq: return {}
+		if not seq: return {'ε'}
 		if seq[0] == 'ε': return {'ε'}
 
 		result = set[str]()
 		for x in seq:
-			result |= self.first[x] - {'ε'}
-			if not self.nullable[x]: 
+			if x in self.g.V:
+				result |= self.first[x] - {'ε'}
+				if not self.nullable[x]: 
+					return result
+			else:
+				# x is T or some special symbols for techinical processing, but not a variable of V
+				result.add(x)
 				return result
 		
 		result.add('ε')
@@ -440,7 +464,7 @@ class generator:
 	def __init__(self, P, S = None):
 		if not P: return
 		if S == None: S = P[0].head 
-		self.from_production(P, S)
+		self.from_production(P.copy(), S)
 
 # LR(0) item
 class item_lr0:
@@ -466,6 +490,8 @@ class item_lr0:
 		return not self == other
 	def __hash__(self):
 		return hash((self.prod, self.ppos))
+	# def __copy__(self):
+	# 	return item_lr0(prod, ppos, is_kernel) 
 
 	def __str__(self):
 		s = '{}{} {: <3} -> '.format('!' if self.is_kernel else ' ', '$' if self.is_reduction_item() else ' ', self.prod.head)
@@ -570,6 +596,7 @@ class slr_pda:
 
 	# test a tok sequence toks whether to be accepted by this SLR PDA
 	def test(self, toks):
+		toks = toks.copy()
 		toks.append(end_token())
 		stack = [0] # saves the index of item set
 		# alias
@@ -589,15 +616,19 @@ class slr_pda:
 			# print(action[top()])
 			if tok in action[top()]:
 				category, arg = action[top()][tok]
+				# select action:
 				if category == action_category.SHIFT:
+					# shift
 					push(arg)
 					tok_index += 1
 				elif category == action_category.REDUCE:
-					# quary the reduct production
+					# reduce
+					# quary the reduce production
 					p = P[arg]
 					for i in range(len(p.body)): pop()
 					push(action[top()][p.head][1]) # actually is push(goto[top()][p.head])
 				elif category == action_category.ACCEPT:
+					# accept
 					return(True, tok_index - 1)
 				else:
 					# bad action table
@@ -608,14 +639,9 @@ class slr_pda:
 
 		return (False, len(toks) - 1)
 
-		# end of tokens
-		# while True:
-
-		# return (end_token() in action[top()] and action[top()][end_token()][0] == action_category.ACCEPT, len(toks))
-
-	def __init__(self, lrgen):
-		self.g = lrgen.g
-		self.generate_action(lrgen.gen.follow, lrgen.items_collection, lrgen.goto)
+	def __init__(self, slrgen):
+		self.g = slrgen.g
+		self.generate_action(slrgen.gen.follow, slrgen.items_collection, slrgen.goto)
 
 
 # SLR generator
@@ -650,7 +676,7 @@ class slr_generator:
 
 	# LR(0) closure
 	def closure(self, I: set):
-		J = I
+		J = I.copy()
 		while True:
 			changed = False
 
@@ -704,7 +730,7 @@ class slr_generator:
 
 
 	def __init__(self, gen):
-		self.gen = deepcopy(gen)
+		self.gen = copy(gen)
 		self.g = self.gen.g
 		# widen grammer
 		self.g.P.insert(0, production(gen.g.S + '\'', [gen.g.S]))
@@ -719,6 +745,11 @@ class item_lr1(item_lr0):
 	def __init__(self, prod, lookahead, ppos = 0, is_kernel = False):
 		super().__init__(prod, ppos, is_kernel)
 		self.lookahead = lookahead
+
+	#construct a LR(1) item from a LR(0) item(core) and a look ahead character
+	@classmethod
+	def from_core(cls, core, lookahead):
+		return item_lr1(core.prod, lookahead, core.ppos, core.is_kernel)
 
 	def __eq__(self, other):
 		return self.ppos == other.ppos and self.prod == other.prod and self.lookahead == other.lookahead;
@@ -738,23 +769,49 @@ class item_lr1(item_lr0):
 
 		return item_lr1(self.prod, self.lookahead, (self.ppos + 1 if self.ppos <= len(self.prod.body) else len(self.prod.body)), is_kernel = True)
 
-	# # closure of this item
-	# def closure(self, G: grammer):
-	# 	J = {self}
-	# 	while True:
-	# 		changed = False
-	# 	if self.current_tok() in G.V:
-
 	def closure_lookaheads(self, gen):
 		# for an item [A -> αBβ, a]
 		# returns a set: first(βa)
 		return gen.first_of_seq(self.prod.body[self.ppos + 1:] + [self.lookahead if self.lookahead != end_token() else '$'])
 
 	def core(self):
-		return super()
+		return item_lr0(self.prod, self.ppos, self.is_kernel)
 
 	def is_reduction_item(self, lookahead = None):
 		return self.ppos >= len(self.prod.body) and (lookahead is None or self.lookahead == lookahead)
+
+# LR(1) Grammer PushDown Automaton
+class lr1_pda(slr_pda):
+
+
+	def __init__(self, lr1gen):
+		self.g = lr1gen.g
+		self.generate_action(lr1gen.items_collection, lr1gen.goto)
+
+	def generate_action(self, items_collection, goto_table):
+		action = []
+
+		for index, items in enumerate(items_collection):
+			action.append(dict())
+			for item in items:
+				if item.is_reduction_item():
+					if item.prod.head == self.g.S and item.lookahead == end_token():
+						# item is an acception item set
+						action[index][end_token()] = (action_category.ACCEPT, None)
+					else:
+						# item is a reduction item set
+						index_of_production = self.g.P.index(item.prod)
+						action[index][item.lookahead] = (action_category.REDUCE, index_of_production)
+				else: # this item isn't a reduction item
+					# shift or goto 
+					for x, target_index in goto_table[index].items():
+						if x in self.g.T:
+							action[index][x] = (action_category.SHIFT, target_index)
+						else: # x in V
+							action[index][x] = (action_category.GOTO, target_index)
+
+		self.action = action
+
 
 # Canonical LR(1) Generator 
 class lr1_generator:
@@ -768,11 +825,12 @@ class lr1_generator:
 
 	exists_conflict = False
 
-	def __init__(self, gen):
-		self.gen = deepcopy(gen)
+	def __init__(self, gen, make_augumented_grammer = True):
+		self.gen = copy(gen)
 		self.g = self.gen.g
 		# widen grammer
-		self.g.P.insert(0, production(gen.g.S + '\'', [gen.g.S]))
+		if make_augumented_grammer:
+			self.g.P.insert(0, production(gen.g.S + '\'', [gen.g.S]))
 		self.gen.update_sets()
 		self.items()
 
@@ -813,6 +871,7 @@ class lr1_generator:
 							J.add(new_item)
 							changed = True
 			if not changed: break
+		# print_itemset(J)
 		return J
 
 	def try_goto(self, I, X):
@@ -850,6 +909,108 @@ class lr1_generator:
 
 		self.items_collection = C
 		self.goto = goto
+
+# LALR(1)(Look Ahead LR(1)) Generator
+class lalr_generator(slr_generator):
+	# gen = None
+	# g = None # grammer
+
+	# # LR(0) 
+	# items_collection = list[set]() # [I0, I1, I2, ...]
+	# goto = list[dict[str, int]]() # goto(i, X) -> i  (i is index of I, X ∈ V | T)
+
+	# exists_conflict = False
+
+	def __init__(self, gen):
+		self.gen = copy(gen)
+		self.g = self.gen.g
+		# widen grammer
+		self.g.P.insert(0, production(gen.g.S + '\'', [gen.g.S]))
+		self.gen.update_sets()
+		self.items()
+
+	def erase_non_kernel_and_indexing(self):
+		# erase all of the non-kernel item from the items_collection
+		# and convert the item set type from set to list
+		self.items_collection = [[item for item in items if item.is_kernel] for items in self.items_collection] # where item is LR(0) item
+
+
+	def generate_lookahead_propagate_list(self, lr1gen):
+		first = self.gen.first_of_seq
+
+
+		propagate_list = dict[tuple[int, int], set[tuple[int, int]]]()
+
+		# list contains the look ahead grammer symbols of the production 
+		# new_items_collection = [list[tuple[item_lr0, list]]() for i in range(len(self.items_collection))]
+		lookahead_list = [[set() for item in items] for items in self.items_collection]
+		# kernel item [S' -> ·S, $] is spontaneously generated
+		# item_collection index: 0 -> { [S' -> ·S] }
+		# item index           : 0 -> [S' -> ·S]
+		lookahead_list[0][0].add(end_token())
+		# new_items_collection[0].add((self.items_collection[0][0], [end_token()]))
+		# new_items_collection[0].add(item_lr1.from_core(self.items_collection[0][0], end_token()))
+
+		for i, kernels in enumerate(self.items_collection):
+			for j, kernel in enumerate(kernels):
+				# for all kernel item: A -> α·β
+				# if kernel.current_tok() not in self.g.V: continue # ... in self.g.T is wrong, because of 'ε'
+				# for all kernel item: A -> α·Bω
+
+				for item in lr1gen.closure({item_lr1.from_core(kernel, None)}): # LR(1) closure
+					if item.is_reduction_item(): continue
+
+					goto_item_set_i = self.goto[i][item.current_tok()]
+					goto_item_i = self.items_collection[goto_item_set_i].index(item.next().core())
+					target = (goto_item_set_i, goto_item_i)
+					# print(item)
+					if item.lookahead is None:
+						# this lookahead symbol is propagated from kernel
+						if (i, j) not in propagate_list: 
+							propagate_list[(i, j)] = set()
+						propagate_list[(i, j)].add(target)
+					else:
+						# this lookahead symbol is spontaneously generate
+						lookahead_list[goto_item_set_i][goto_item_i].add(item.next().lookahead)
+
+		return lookahead_list, propagate_list
+
+
+	def propagate(self, lookahead_list, propagate_list):
+		while True:
+			changed = False
+
+			for start, targets in propagate_list.items():
+				# start_items_i, start_item_i = start
+				start_lookaheads = lookahead_list[start[0]][start[1]] 
+				if len(start_lookaheads) != 0:
+					for items_i, item_i in targets:
+						target_lookaheads = lookahead_list[items_i][item_i]
+						if not target_lookaheads.issuperset(start_lookaheads):
+							# propagates from start to target
+							target_lookaheads.update(start_lookaheads)
+							changed = True
+				# print(lookahead_list)
+			if not changed: break
+
+		# generate new items_collection
+		# new_items_collection = [list[tuple[item_lr0, list]]() for i in range(len(self.items_collection))]
+		new_items_collection = list()
+		for items_i, items in enumerate(self.items_collection):
+			new_items_collection.append(set())
+			for item_i, item in enumerate(items):
+				new_items_collection[items_i].update({item_lr1.from_core(item, b) for b in lookahead_list[items_i][item_i]})
+		self.items_collection = new_items_collection
+
+	def items(self):
+		super().items() # generate LR(0) items_collection and goto
+		self.erase_non_kernel_and_indexing() 
+		
+		lr1gen = lr1_generator(self.gen, False)
+		lookahead_list, propagate_list = self.generate_lookahead_propagate_list(lr1gen) # new_item_collection is a LALR(1) item set collection
+		self.propagate(lookahead_list, propagate_list)
+		
+
 # # test
 # P = lex(r'''
 # 		S' -> S
@@ -871,19 +1032,19 @@ class lr1_generator:
 # 	  -> id
 #  ''')
 
-P = lex('''
-	S -> C C
-	C -> c C
-	  -> d
-''')
-
-# P = lex(r'''
-# 	S -> L = R 
-# 	  -> R
-# 	L -> * R 
-# 	  -> id
-# 	R -> L
+# P = lex('''
+# 	S -> C C
+# 	C -> c C
+# 	  -> d
 # ''')
+
+P = lex(r'''
+	S -> L = R 
+	  -> R
+	L -> * R 
+	  -> id
+	R -> L
+''')
 
 # P = lex(r'''
 # 	S -> E
@@ -897,6 +1058,15 @@ P = lex('''
 # 	  -> (E)
 
 # 	''')
+
+# P = lex('''
+# 	S	-> a A d
+# 		-> b B d
+# 		-> a B e
+# 		-> b A e
+# 	A	-> c
+# 	B	-> c
+# ''')
 
 # P = lex(r'''
 # 	S -> A a
@@ -938,24 +1108,45 @@ gen = generator(P)
 # gen.remove_verbose_producions_and_sort()
 # print_productions(gen.g.P)
 # print_all(gen)
-print('---------------SLR-Generator---------------')
-slr_gen = slr_generator(gen)
-print_all(slr_gen.gen)
-print('-------------------items-------------------')
-slr_gen.print_items()
-print('-------------------goto--------------------')
-slr_gen.print_goto()
-print('-----------------SLR-PDA-------------------')
-slr = slr_pda(slr_gen)
-slr.print_action()
+# print('---------------SLR-Generator---------------')
+# slr_gen = slr_generator(copy(gen))
+# print_all(slr_gen.gen)
+# print('-------------------items-------------------')
+# slr_gen.print_items()
+# print('-------------------goto--------------------')
+# slr_gen.print_goto()
+# print('-----------------SLR-PDA-------------------')
+# slr = slr_pda(slr_gen)
+# slr.print_action()
 # print('-----------------test-PDA------------------')
 # seq = ['id', '*', 'id']
 # print(' '.join(seq))
 # print(slr.test(seq))
 print('----------Canonical-LR-Generator-----------')
-lr1_gen = lr1_generator(gen)
+lr1_gen = lr1_generator(generator(copy(P)))
 print_all(lr1_gen.gen)
 print('-------------------items-------------------')
 lr1_gen.print_items()
 print('-------------------goto--------------------')
 lr1_gen.print_goto()
+print('-----------------LR(1)-PDA-----------------')
+lr1 = lr1_pda(lr1_gen)
+lr1.print_action()
+print('-----------------test-PDA------------------')
+seq = ['*', 'id', '=', 'id']
+print(' '.join(seq))
+print(lr1.test(seq))
+print('--------------LALR-Generator---------------')
+lalr_gen = lalr_generator(generator(copy(P)))
+print_all(lalr_gen.gen)
+print('-------------------items-------------------')
+lalr_gen.print_items()
+print('-------------------goto--------------------')
+lalr_gen.print_goto()
+print('------------LALR/LR(1)-PDA-----------------')
+lalr = lr1_pda(lalr_gen)
+lalr.print_action()
+print('-----------------test-PDA------------------')
+# seq = ['id', '*', 'id']
+print(' '.join(seq))
+print(lalr.test(seq))
